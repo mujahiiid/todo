@@ -1,36 +1,79 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Ritual
 
-## Getting Started
+Ritual is a mobile-first, bilingual personal routine tracker built with Next.js 16, React 19, TypeScript, Tailwind CSS, Supabase, and dnd-kit. It uses a calm notes-inspired interface, dynamic recurring occurrences, Saturday–Friday weeks, archived weekly summaries, structured PDF reports, and a PWA/web-push foundation.
 
-First, run the development server:
+## Run locally
 
 ```bash
+npm install
+copy .env.example .env.local
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open `http://localhost:3000`. When Supabase variables are blank, the app intentionally starts in local demo mode and persists changes in `localStorage`. This makes the complete interaction model reviewable without credentials. With Supabase configured, `/app` is protected and `/login` uses email/password authentication.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Supabase setup
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+1. Create a Supabase project.
+2. Run `supabase/migrations/202609210001_initial_schema.sql` in the SQL editor or with `supabase db push`.
+3. Copy the project URL and anon key into `.env.local`.
+4. Add the service-role key only to the server/deployment environment. Never expose it with a `NEXT_PUBLIC_` prefix.
+5. Add `http://localhost:3000/auth/callback` and the production callback URL to the Supabase authentication redirect allowlist.
 
-## Learn More
+The migration creates profiles, user settings, pages, blocks, tasks, task slots, completion logs, push subscriptions, notification logs, weekly archives, and a per-user offline-sync snapshot. RLS is enabled on every user-owned table. Direct ownership policies use `auth.uid()`; child tables verify ownership through their parent page/task. The snapshot lets the optimistic editor sync atomically while normalized task/history tables remain available for reporting and scheduled work.
 
-To learn more about Next.js, take a look at the following resources:
+## Environment variables
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+See `.env.example`:
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+- `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`: public Supabase client configuration.
+- `SUPABASE_SERVICE_ROLE_KEY`: server-only cron access.
+- `NEXT_PUBLIC_VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT`: Web Push credentials.
+- `CRON_SECRET`: bearer token required by both cron routes.
 
-## Deploy on Vercel
+Generate VAPID keys with `npx web-push generate-vapid-keys`. Store private values only in local/deployment secrets.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Recurrence and week model
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Tasks store one recurrence definition (`daily`, selected weekdays, weekly, one-time, or interval) and any number of labeled time slots. The UI derives occurrences for the visible date range; it does not create future task rows. Only a non-pending completion is stored, identified by task, occurrence date, and slot.
+
+Weeks default to Saturday through Friday. `lib/week.ts` calculates the containing week for any date and covers month/year transitions in `tests/week.test.ts`. Starting a new week changes the active view logically, so old status never leaks into it. The weekly cron writes idempotent archive rows using the unique `(user_id, week_start)` constraint.
+
+## Reports
+
+`GET /api/reports` creates a real PDF with `pdf-lib`; it does not screenshot the interface. The bundled Noto Sans Arabic variable font supports English and Arabic text. Use `?pageId=<uuid>` for one page or omit it for all pages, and `?week=YYYY-MM-DD` to regenerate an archived week. Production data can replace the included demo projection through the same report boundary.
+
+## PWA and notifications
+
+`app/manifest.ts`, `public/sw.js`, and the maskable SVG icon make the site installable. The service worker caches the app shell and handles push notifications. Notification permission is requested only after the user presses Enable in Settings.
+
+Subscriptions are validated and upserted through `POST /api/push/subscribe`. `POST /api/cron/reminders` is protected by `Authorization: Bearer $CRON_SECRET`, claims due work through an idempotent database boundary, and is ready for a VAPID delivery worker. Delivery attempts are keyed per task/slot/date to prevent duplicates.
+
+## Cron setup
+
+Call these routes from Vercel Cron or another scheduler with the bearer header:
+
+- `/api/cron/reminders`: every minute (or every five minutes), to claim due notifications.
+- `/api/cron/weekly`: hourly. The database function archives only finished, previously unarchived weeks, so running it more than once is safe and accommodates user timezones.
+
+For Vercel Cron, use a small external scheduler or an authenticated function invocation if custom headers are required. Keep `CRON_SECRET` server-side.
+
+## Quality checks
+
+```bash
+npm run lint
+npm run typecheck
+npm test
+npm run build
+```
+
+## Deploy to Vercel
+
+1. Import the repository into Vercel.
+2. Add every required environment variable in Project Settings.
+3. Apply the Supabase migration before the first production login.
+4. Add the production `/auth/callback` URL to Supabase.
+5. Deploy, verify PWA installation over HTTPS, then schedule the two protected cron routes.
+
+The app is designed around narrow client islands: Next.js handles routing, metadata, auth callback, PDFs, push subscriptions, and cron endpoints; the interactive editor uses a focused client provider for optimistic local interactions. Supabase RLS remains the production security boundary.
+"# todo" 
