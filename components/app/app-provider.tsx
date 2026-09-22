@@ -6,6 +6,7 @@ import { demoState } from "@/lib/demo-data";
 import type { AppState, CompletionLog, RoutineBlock, RoutinePage, TaskStatus, UserSettings } from "@/lib/types";
 import { uid } from "@/lib/utils";
 import { createClient } from "@/lib/supabase/client";
+import { createSnapshot, isAppState, newestSnapshot, parseStoredSnapshot, type StateSnapshot } from "@/lib/state-storage";
 
 type Context = {
   state: AppState; hydrated: boolean;
@@ -27,30 +28,45 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const syncUserId = useRef<string | null>(null);
   useEffect(() => {
     const timer = window.setTimeout(async () => {
-      let initial = demoState;
-      try { const stored = localStorage.getItem(storageKey); if (stored) initial = JSON.parse(stored) as AppState; } catch { /* keep safe demo state */ }
+      const local = parseStoredSnapshot(localStorage.getItem(storageKey));
+      let selected: StateSnapshot | null = local;
       const supabase = createClient();
       if (supabase) {
-        const { data: { user } } = await supabase.auth.getUser();
+        const { data: { user }, error: authError } = await supabase.auth.getUser();
+        if (authError) console.error("[Ritual sync] Could not read the authenticated user", authError.message);
         if (user) {
           syncUserId.current = user.id;
-          const { data } = await supabase.from("user_app_states").select("state").eq("user_id", user.id).maybeSingle();
-          if (data?.state) initial = data.state as AppState;
-          else {
-            initial = { ...demoState, pages: [], logs: [], settings: { ...demoState.settings, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC" } };
-            await supabase.from("user_app_states").upsert({ user_id: user.id, state: initial });
+          const { data, error } = await supabase.from("user_app_states").select("state,updated_at").eq("user_id", user.id).maybeSingle();
+          if (error) console.error("[Ritual sync] Could not load cloud data", error.message);
+          const remote = data && isAppState(data.state) ? createSnapshot(data.state, data.updated_at) : null;
+          selected = newestSnapshot(local, remote);
+          if (!selected) {
+            const emptyState: AppState = { ...demoState, pages: [], logs: [], settings: { ...demoState.settings, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC" } };
+            selected = createSnapshot(emptyState);
+          }
+          if (!remote || selected.updatedAt !== remote.updatedAt) {
+            const { error: saveError } = await supabase.from("user_app_states").upsert({ user_id: user.id, state: selected.state, updated_at: selected.updatedAt });
+            if (saveError) console.error("[Ritual sync] Could not reconcile cloud data", saveError.message);
           }
         }
       }
-      setState(initial); setHydrated(true);
+      selected ??= createSnapshot(demoState);
+      localStorage.setItem(storageKey, JSON.stringify(selected));
+      setState(selected.state); setHydrated(true);
     }, 0);
     return () => window.clearTimeout(timer);
   }, []);
   useEffect(() => {
     if (!hydrated) return;
-    localStorage.setItem(storageKey, JSON.stringify(state));
+    const snapshot = createSnapshot(state);
+    localStorage.setItem(storageKey, JSON.stringify(snapshot));
     if (!syncUserId.current) return;
-    const timer = window.setTimeout(() => { const supabase = createClient(); void supabase?.from("user_app_states").upsert({ user_id: syncUserId.current, state, updated_at: new Date().toISOString() }); }, 500);
+    const timer = window.setTimeout(async () => {
+      const supabase = createClient();
+      if (!supabase) return;
+      const { error } = await supabase.from("user_app_states").upsert({ user_id: syncUserId.current, state: snapshot.state, updated_at: snapshot.updatedAt });
+      if (error) console.error("[Ritual sync] Could not save cloud data", error.message);
+    }, 300);
     return () => window.clearTimeout(timer);
   }, [hydrated, state]);
 

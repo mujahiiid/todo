@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import webpush from "web-push";
+import { timingSafeEqual } from "node:crypto";
 import type { AppState, Frequency } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -24,8 +25,37 @@ function occurs(frequency: Frequency, date: string, weekday: number) {
   return days >= 0 && days % frequency.every === 0;
 }
 
-export async function POST(request: Request) {
-  if (!process.env.CRON_SECRET || request.headers.get("authorization") !== `Bearer ${process.env.CRON_SECRET}`) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+function isAuthorized(request: Request) {
+  const secret = process.env.CRON_SECRET;
+  const authorization = request.headers.get("authorization");
+  if (!secret || !authorization?.startsWith("Bearer ")) return false;
+  const supplied = Buffer.from(authorization.slice(7));
+  const expected = Buffer.from(secret);
+  return supplied.length === expected.length && timingSafeEqual(supplied, expected);
+}
+
+function previousDate(date: string) {
+  const value = new Date(`${date}T12:00:00Z`);
+  value.setUTCDate(value.getUTCDate() - 1);
+  return value.toISOString().slice(0, 10);
+}
+
+function dueOccurrence(localTime: string, clock: ReturnType<typeof localClock>) {
+  const [slotHour, slotMinute] = localTime.slice(0, 5).split(":").map(Number);
+  const [clockHour, clockMinute] = clock.time.split(":").map(Number);
+  let delta = clockHour * 60 + clockMinute - (slotHour * 60 + slotMinute);
+  let date = clock.date;
+  let weekday = clock.weekday;
+  if (delta < 0) {
+    delta += 1_440;
+    date = previousDate(date);
+    weekday = (weekday + 6) % 7;
+  }
+  return delta < 5 ? { date, weekday } : null;
+}
+
+async function handleReminderCron(request: Request) {
+  if (!isAuthorized(request)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL; const key = process.env.SUPABASE_SERVICE_ROLE_KEY; const publicKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY; const privateKey = process.env.VAPID_PRIVATE_KEY; const subject = process.env.VAPID_SUBJECT;
   if (!url || !key || !publicKey || !privateKey || !subject) return NextResponse.json({ error: "Supabase or VAPID is not configured" }, { status: 503 });
   webpush.setVapidDetails(subject, publicKey, privateKey);
@@ -39,8 +69,9 @@ export async function POST(request: Request) {
   const subscriptions = (rawSubscriptions ?? []) as Subscription[]; const now = new Date(); let sent = 0; let failed = 0;
   for (const slot of slots) {
     const clock = localClock(now, slot.timezone || "UTC");
-    if (slot.local_time.slice(0, 5) !== clock.time || !occurs(slot.task.frequency, clock.date, clock.weekday)) continue;
-    const { data: log, error: logError } = await supabase.from("notification_logs").insert({ user_id: slot.task.user_id, task_id: slot.task.id, slot_id: slot.id, occurrence_date: clock.date, scheduled_for: now.toISOString(), status: "sending" }).select("id").single();
+    const occurrence = dueOccurrence(slot.local_time, clock);
+    if (!occurrence || !occurs(slot.task.frequency, occurrence.date, occurrence.weekday)) continue;
+    const { data: log, error: logError } = await supabase.from("notification_logs").insert({ user_id: slot.task.user_id, task_id: slot.task.id, slot_id: slot.id, occurrence_date: occurrence.date, scheduled_for: now.toISOString(), status: "sending" }).select("id").single();
     if (logError?.code === "23505") continue;
     if (logError || !log) { failed += 1; continue; }
     const targets = subscriptions.filter((subscription) => subscription.user_id === slot.task.user_id);
@@ -50,3 +81,6 @@ export async function POST(request: Request) {
   }
   return NextResponse.json({ ok: true, sent, failed });
 }
+
+export const GET = handleReminderCron;
+export const POST = handleReminderCron;
