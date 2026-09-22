@@ -47,16 +47,16 @@ Weeks default to Saturday through Friday. `lib/week.ts` calculates the containin
 
 `app/manifest.ts`, `public/sw.js`, and the maskable SVG icon make the site installable. The service worker caches the app shell and handles push notifications. Notification permission is requested only after the user presses Enable in Settings.
 
-Subscriptions are validated and upserted through `POST /api/push/subscribe`. `POST /api/cron/reminders` is protected by `Authorization: Bearer $CRON_SECRET`, claims due work through an idempotent database boundary, and is ready for a VAPID delivery worker. Delivery attempts are keyed per task/slot/date to prevent duplicates.
+Subscriptions are validated and upserted through `POST /api/push/subscribe`. `GET /api/cron/reminders` is protected by `Authorization: Bearer $CRON_SECRET`, evaluates due work in each user's timezone, and delivers it with VAPID. Delivery attempts are keyed per task/slot/date to prevent duplicates.
 
 ## Cron setup
 
-Call these routes from Vercel Cron or another scheduler with the bearer header:
+The included GitHub Actions workflow calls `/api/cron/reminders` every five minutes. Add these encrypted repository secrets under **Settings → Secrets and variables → Actions**:
 
-- `/api/cron/reminders`: every minute (or every five minutes), to claim due notifications.
-- `/api/cron/weekly`: hourly. The database function archives only finished, previously unarchived weeks, so running it more than once is safe and accommodates user timezones.
+- `APP_URL`: the stable production origin, for example `https://your-project.vercel.app` (without a trailing path).
+- `CRON_SECRET`: exactly the same value configured in the Vercel production environment.
 
-For Vercel Cron, use a small external scheduler or an authenticated function invocation if custom headers are required. Keep `CRON_SECRET` server-side.
+The workflow sends `Authorization: Bearer $CRON_SECRET`, has a three-minute job timeout, retries transient failures twice, prevents overlapping runs, and can also be started manually from the Actions tab. Scheduled GitHub Actions may start a few minutes late during periods of high platform load.
 
 ## Quality checks
 
